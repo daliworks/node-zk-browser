@@ -21,12 +21,18 @@
  * author :dennis (killme2008@gmail.com)
  *
  */
+/*jshint camelcase:false, quotmark:false*/
+'use strict';
 
 var express = require('express');
 require('express-namespace');
 var path=require('path');
 var fs=require('fs');
+var crypto=require('crypto');
 var util=require('util');
+var https=require('https');
+var http=require('http');
+var auth = require('http-auth');
 var ZkClient=require('./zk.js').ZkClient;
 
 var port = process.env.ZK_BROWSER_PORT || 3000;
@@ -42,14 +48,19 @@ process.on('uncaughtException', function (err) {
 
 // Configuration
 app.configure(function(){
-    app.set('views', __dirname + '/views');
-    app.set('view engine', 'ejs');
-    app.use(express.cookieParser());
-    app.use(express.session({ secret: "node zk browser" }));
-    app.use(express.bodyParser());
-    app.use(express.methodOverride());
-    app.use(app.router);
-    app.use(express.static(__dirname + '/public'));
+  app.set('views', __dirname + '/views');
+  app.set('view engine', 'ejs');
+  app.use(express.cookieParser());
+  app.use(express.session({ secret: "node zk browser" }));
+  app.use(express.bodyParser());
+  app.use(express.methodOverride());
+  app.use(app.router);
+  app.use(auth.connect(
+    auth.digest({ realm: 'zk-browser', }, function (username, callback) {
+      callback(users[username]);
+    })));
+  app.use(express.static(__dirname + '/public'));
+  //app.use(require('morgan')());
 });
 
 app.configure('development', function(){
@@ -63,121 +74,141 @@ app.configure('production', function(){
 // Routes
 
 app.get('/', function(req, res){
-    res.redirect("/node-zk");
+  res.redirect("/node-zk");
 });
 
 app.namespace("/node-zk",function(){
 
-    //index
-    app.get('/', function(req, res){
-        res.render('index', { });
-    });
+  //index
+  app.get('/', function(req, res){
+    res.render('index', { });
+  });
 
-    //display tree
-    app.get('/tree', function(req, res){
-        var path=req.query.path || "/";
-        res.render('tree', {layout:false,'path':path  });
-    });
+  //display tree
+  app.get('/tree', function(req, res){
+    var path=req.query.path || "/";
+    res.render('tree', {layout:false,'path':path  });
+  });
 
-    //login
-    app.post("/login",function(req,res){
-        var user=req.body.user;
-        if(users[user.name]==user.password){
-            req.session.user=user.name
-            req.session.cookie.maxAge=5*60*1000;
+  //login
+  app.post("/login",function(req,res){
+    var user=req.body.user;
+    if(users[user.name]===user.password || 
+      users[user.name] === 
+          crypto.createHash('md5').update([user.name, 'zk-browser', user.password].join(':')).digest('hex')){
+      req.session.user=user.name;
+      req.session.cookie.maxAge=5*60*1000;
+    }
+    res.redirect(req.header('Referer'));
+  });
+
+  //delete
+  app.post("/delete",function(req,res){
+    if(req.session.user){
+      var path=req.body.path;
+      var version=Number(req.body.version);
+      zkclient.zk.a_delete_(path,version,function(rc,err){
+        if(rc!==0) {
+          res.send(err);
+        } else{
+          res.send("Delete ok");
         }
-        res.redirect(req.header('Referer'));
-    });
+      });
+    }else{
+      res.send("Please logon");
+    }
+  });
 
-    //delete
-    app.post("/delete",function(req,res){
-        if(req.session.user){
-            var path=req.body.path;
-            var version=Number(req.body.version);
-            zkclient.zk.a_delete_(path,version,function(rc,err){
-                if(rc!=0)
-                    res.send(err);
-                else
-                    res.send("Delete ok");
-            });
-        }else{
-            res.send("Please logon");
+  //create view
+  app.get("/create",function(req,res){
+    res.render("create",{layout:false,user: req.session.user});
+  });
+
+  //create
+  app.post("/create",function(req,res){
+    if(req.session.user){
+      var path=req.body.path;
+      var data=req.body.data;
+      var flag=Number(req.body.flag);
+      zkclient.zk.a_create(path,data,flag,function(rc,err,path){
+        if(rc!==0) {
+          res.send(err);
+        } else {
+          res.send("Create ok");
         }
-    });
+      });
+    }else{
+      res.send("Please logon");
+    }
+  });
 
-    //create view
-    app.get("/create",function(req,res){
-        res.render("create",{layout:false,user: req.session.user});
-    });
-
-    //create
-    app.post("/create",function(req,res){
-        if(req.session.user){
-            var path=req.body.path;
-            var data=req.body.data;
-            var flag=Number(req.body.flag);
-            zkclient.zk.a_create(path,data,flag,function(rc,err,path){
-                if(rc!=0)
-                    res.send(err);
-                else
-                    res.send("Create ok");
-            });
-        }else{
-            res.send("Please logon");
+  //edit
+  app.post("/edit",function(req,res){
+    if(req.session.user){
+      var path=req.body.path;
+      var new_data=req.body.new_data;
+      var version=Number(req.body.version);
+      zkclient.zk.a_set(path,new_data,version,function(rc,err,stat){
+        if(rc!==0){
+          res.send(err);
+        }else {
+          res.send("set ok");
         }
-    });
+      });
+    }else{
+      res.send("Please logon");
+    }
+  });
 
-    //edit
-    app.post("/edit",function(req,res){
-        if(req.session.user){
-            var path=req.body.path;
-            var new_data=req.body.new_data;
-            var version=Number(req.body.version);
-            zkclient.zk.a_set(path,new_data,version,function(rc,err,stat){
-                if(rc!=0){
-                    res.send(err);
-                }else
-                    res.send("set ok");
-            });
-        }else{
-            res.send("Please logon");
-        }
+  //query data
+  app.get("/get",function(req,res){
+    var path=req.query.path || "/";
+    zkclient.zk.a_get(path,null,function(rc,err,stat,data){
+      if(rc!==0){
+        res.send(err);
+      }else{
+        res.render("data",{ layout: false, 'stat':stat,'data':data,'path':path,'user': req.session.user});
+      }
     });
+  });
 
-    //query data
-    app.get("/get",function(req,res){
-        var path=req.query.path || "/";
-        zkclient.zk.a_get(path,null,function(rc,err,stat,data){
-            if(rc!=0){
-                res.send(err);
-            }else{
-                res.render("data",{ layout: false, 'stat':stat,'data':data,'path':path,'user': req.session.user});
-            }
+  //query children
+  app.get('/children',function(req,res){
+    var parenPath=req.query.path || '/';
+    zkclient.zk.a_get_children(parenPath,null,function(rc,error,children){
+      res.header("Content-Type","application/json");
+      var result=[];
+      if(rc===0){
+        children.forEach(function(child){
+          var realPath=path.join(parenPath,child);
+          result.unshift({
+            attributes:{"path":realPath,"rel":"chv"},
+            data:{
+              title : child,
+              icon:"ou.png", 
+              attributes: { "href" : ("/node-zk/get?path="+realPath) }
+            },
+            state:"closed"
+          });
         });
+      }
+      res.send(result);
     });
-
-    //query children
-    app.get('/children',function(req,res){
-        var parenPath=req.query.path || '/';
-        zkclient.zk.a_get_children(parenPath,null,function(rc,error,children){
-            res.header("Content-Type","application/json");
-            var result=[];
-            if(rc==0){
-                children.forEach(function(child){
-                    realPath=path.join(parenPath,child);
-                    result.unshift({
-                        attributes:{"path":realPath,"rel":"chv"},
-                        data:{
-                            title : child,icon:"ou.png", attributes: { "href" : ("/node-zk/get?path="+realPath) }
-                        },
-                        state:"closed"
-                    });
-                });
-            }
-            res.send(result);
-        });
-    });
+  });
 });
 
-app.listen(port);
-console.log("Express server listening on port %d", port);
+var server;
+if (fs.existsSync(path.join(__dirname, 'ssl', 'key.pem')) &&
+  fs.existsSync(path.join(__dirname, 'ssl', 'cert.pem'))) {
+  server = https.createServer({
+    key: fs.readFileSync(path.join(__dirname, 'ssl', 'key.pem'), 'utf8'),
+    cert: fs.readFileSync(path.join(__dirname, 'ssl', 'cert.pem'), 'utf8'),
+  }, app);
+  server.listen(port);
+  console.log("HTTPS listening on port %d", port);
+} else {
+  server = http.createServer(app);
+  server.listen(port);
+  console.log("HTTP listening on port %d", port);
+}
+
